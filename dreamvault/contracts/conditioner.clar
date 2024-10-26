@@ -8,6 +8,8 @@
 (define-constant err-invalid-time (err u102))
 (define-constant err-entry-not-found (err u103))
 (define-constant err-index-full (err u104))
+(define-constant err-invalid-tag (err u105))
+(define-constant err-invalid-user (err u106))
 
 ;; Data Types
 (define-map dreams
@@ -25,28 +27,57 @@
 (define-map dream-counts principal uint)
 (define-map tag-index { tag: (string-utf8 32) } (list 50 { dream-id: uint, owner: principal }))
 
-;; Private function to check ownership
+;; Private Functions
 (define-private (is-owner (dream-id uint))
     (match (map-get? dreams {dream-id: dream-id, owner: tx-sender})
         entry true
         false)
 )
 
-;; Private function to get dream count
 (define-private (get-dream-count-internal (user principal))
     (default-to u0 (map-get? dream-counts user))
 )
 
-;; Add new dream entry
+(define-private (validate-tag (tag (string-utf8 32)))
+    (and (> (len tag) u0) (<= (len tag) u32))
+)
+
+(define-private (validate-tag-list (tag (string-utf8 32)) (valid bool))
+    (and valid (validate-tag tag))
+)
+
+(define-private (validate-tags (tags (list 10 (string-utf8 32))))
+    (and 
+        (<= (len tags) u10)
+        (fold validate-tag-list tags true)
+    )
+)
+
+(define-private (validate-user (user principal))
+    (is-some (map-get? dream-counts user))
+)
+
+(define-private (validate-bool (value bool))
+    true
+)
+
+;; Public Functions
 (define-public (add-dream (content (string-utf8 2048)) 
                          (unlock-time uint) 
                          (is-private bool)
                          (is-anonymous bool)
                          (tags (list 10 (string-utf8 32))))
-    (let ((dream-id (get-dream-count-internal tx-sender)))
+    (let (
+        (dream-id (get-dream-count-internal tx-sender))
+        (validated-private (validate-bool is-private))
+        (validated-anonymous (validate-bool is-anonymous))
+    )
         (begin
             (asserts! (> (len content) u0) err-invalid-dream)
             (asserts! (>= unlock-time block-height) err-invalid-time)
+            (asserts! (validate-tags tags) err-invalid-tag)
+            (asserts! validated-private err-not-authorized)
+            (asserts! validated-anonymous err-not-authorized)
             
             (map-set dreams
                 { dream-id: dream-id, owner: tx-sender }
@@ -69,7 +100,6 @@
     )
 )
 
-;; Read dream entry (with privacy checks)
 (define-public (read-dream (dream-id uint) (owner principal))
     (let ((entry (unwrap! (map-get? dreams {dream-id: dream-id, owner: owner}) 
                          err-entry-not-found)))
@@ -92,7 +122,6 @@
     )
 )
 
-;; Update dream privacy settings
 (define-public (update-privacy (dream-id uint) 
                              (is-private bool)
                              (is-anonymous bool))
@@ -101,6 +130,8 @@
                          err-entry-not-found)))
         (begin
             (asserts! (is-owner dream-id) err-not-authorized)
+            (asserts! (validate-bool is-private) err-not-authorized)
+            (asserts! (validate-bool is-anonymous) err-not-authorized)
             
             (map-set dreams
                 { dream-id: dream-id, owner: tx-sender }
@@ -114,29 +145,35 @@
     )
 )
 
-;; Get dream count for user
 (define-public (get-dream-count (user principal))
-    (ok (get-dream-count-internal user))
-)
-
-;; Get all public dreams for a tag
-(define-public (get-public-dreams-by-tag (tag (string-utf8 32)))
-    (ok (default-to (list) (map-get? tag-index {tag: tag})))
-)
-
-;; Add a tag to dream index
-(define-public (add-tag-to-index (dream-id uint) (tag (string-utf8 32)))
-    (let (
-        (current-entries (default-to (list) (map-get? tag-index {tag: tag})))
-        (new-entry {dream-id: dream-id, owner: tx-sender})
+    (begin
+        (asserts! (validate-user user) err-invalid-user)
+        (ok (get-dream-count-internal user))
     )
-        (if (< (len current-entries) u50)
-            (begin
-                (map-set tag-index 
-                    {tag: tag}
-                    (unwrap! (as-max-len? (concat current-entries (list new-entry)) u50)
-                            err-index-full))
-                (ok true))
-            err-index-full)
+)
+
+(define-public (get-public-dreams-by-tag (tag (string-utf8 32)))
+    (begin
+        (asserts! (validate-tag tag) err-invalid-tag)
+        (ok (default-to (list) (map-get? tag-index {tag: tag})))
+    )
+)
+
+(define-public (add-tag-to-index (dream-id uint) (tag (string-utf8 32)))
+    (begin
+        (asserts! (validate-tag tag) err-invalid-tag)
+        (let (
+            (current-entries (default-to (list) (map-get? tag-index {tag: tag})))
+            (new-entry {dream-id: dream-id, owner: tx-sender})
+        )
+            (if (< (len current-entries) u50)
+                (begin
+                    (map-set tag-index 
+                        {tag: tag}
+                        (unwrap! (as-max-len? (concat current-entries (list new-entry)) u50)
+                                err-index-full))
+                    (ok true))
+                err-index-full)
+        )
     )
 )
