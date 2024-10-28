@@ -10,6 +10,8 @@
 (define-constant err-index-full (err u104))
 (define-constant err-invalid-tag (err u105))
 (define-constant err-invalid-user (err u106))
+(define-constant err-not-in-pool (err u107))
+(define-constant err-already-unlocked (err u108))
 
 ;; Data Types
 (define-map dreams
@@ -24,8 +26,19 @@
     }
 )
 
+;; New map for anonymous dream pool
+(define-map anonymous-pool
+    uint  ;; dream-id
+    {
+        owner: principal,
+        is-unlocked: bool,
+        unlock-block: uint
+    }
+)
+
 (define-map dream-counts principal uint)
 (define-map tag-index { tag: (string-utf8 32) } (list 50 { dream-id: uint, owner: principal }))
+(define-data-var anonymous-pool-counter uint u0)
 
 ;; Private Functions
 (define-private (is-owner (dream-id uint))
@@ -59,6 +72,16 @@
 
 (define-private (validate-bool (value bool))
     true
+)
+
+;; New function to generate pseudo-random unlock time
+(define-private (generate-unlock-time)
+    (let (
+        (current-block block-height)
+        (random-blocks (mod (var-get anonymous-pool-counter) u144))  ;; ~24 hours in blocks
+    )
+        (+ current-block (+ u72 random-blocks))  ;; Minimum 12 hours + random time
+    )
 )
 
 ;; Public Functions
@@ -95,20 +118,44 @@
                 tx-sender 
                 (+ dream-id u1))
             
-            (ok dream-id)
+            ;; If anonymous, add to anonymous pool
+            (if is-anonymous
+                (begin
+                    (map-set anonymous-pool
+                        dream-id
+                        {
+                            owner: tx-sender,
+                            is-unlocked: false,
+                            unlock-block: (generate-unlock-time)
+                        }
+                    )
+                    (var-set anonymous-pool-counter (+ (var-get anonymous-pool-counter) u1))
+                    (ok dream-id)
+                )
+                (ok dream-id)
+            )
         )
     )
 )
 
 (define-public (read-dream (dream-id uint) (owner principal))
-    (let ((entry (unwrap! (map-get? dreams {dream-id: dream-id, owner: owner}) 
-                         err-entry-not-found)))
+    (let (
+        (entry (unwrap! (map-get? dreams {dream-id: dream-id, owner: owner}) 
+                         err-entry-not-found))
+        (anonymous-entry (map-get? anonymous-pool dream-id))
+    )
         (begin
             (asserts! (or
                 (is-eq tx-sender owner)
                 (and
                     (not (get is-private entry))
-                    (>= block-height (get unlock-time entry))
+                    (or
+                        (>= block-height (get unlock-time entry))
+                        (and
+                            (is-some anonymous-entry)
+                            (get is-unlocked (unwrap! anonymous-entry err-not-in-pool))
+                        )
+                    )
                 )
             ) err-not-authorized)
             
@@ -141,6 +188,27 @@
                 })
             )
             (ok true)
+        )
+    )
+)
+
+;; New function to check if anonymous dream is unlocked
+(define-public (check-anonymous-dream-status (dream-id uint))
+    (let ((entry (unwrap! (map-get? anonymous-pool dream-id) err-not-in-pool)))
+        (begin
+            (if (and
+                    (not (get is-unlocked entry))
+                    (>= block-height (get unlock-block entry))
+                )
+                (begin
+                    (map-set anonymous-pool
+                        dream-id
+                        (merge entry { is-unlocked: true })
+                    )
+                    (ok true)
+                )
+                (ok false)
+            )
         )
     )
 )
